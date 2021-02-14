@@ -19,7 +19,7 @@ lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
     decay_steps=100000,
     decay_rate=0.45,
     staircase=True)
-network_config = NetworkConfig(n_training=32768, batchsize=4, lr=lr_schedule, IF=4, n_validation=64, n_kern_unet_init=128, epochs=5, training_types=("cylinder", "line", "line", "polygon"))
+network_config = NetworkConfig(n_training=32768, batchsize=32, lr=lr_schedule, IF=8, n_validation=64, n_kern_unet_init=128, epochs=30, training_types=("cylinder", "line", "line", "polygon"))
 
 data_provider = CGHDataProvider(slm=slm, system=system, config=network_config)
 
@@ -30,13 +30,13 @@ data_provider = CGHDataProvider(slm=slm, system=system, config=network_config)
 #show_batch(sample)
 
 model = CGHNet(data_provider)
-model.train_network()
-model.save_model()
+#model.train_network()
+#model.save_model()
 
-gt1 = np.array(plt.imread("hc_1024.png"), dtype='float32')
+gt1 = np.array(plt.imread("hc_1024.jpg"), dtype='float32')
 gt2 = np.array(plt.imread("cirkel4.png"))
 gt3 = np.array(plt.imread("cirkel0.png"))
-g = np.expand_dims(gt1[:, :, 0], axis=0)
+g = np.expand_dims(gt1[:, :, 0], axis=[0,-1])
 g -= g.min()
 g /= g.max()
 #g2 = np.expand_dims(np.pad(gt2[:, :, 0], 0), axis=[0])

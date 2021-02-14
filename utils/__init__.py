@@ -10,7 +10,7 @@ def _read_tfrecord(path, shape):
     example = tf.io.parse_single_example(path, tfrecord_format)
     image = tf.cast(tf.reshape(tf.io.decode_raw(example['image'], tf.float64), shape),
                     tf.float32)
-    return image
+    return image, image
 
 def _load_dataset(filenames, shape):
     ignore_order = tf.data.Options()
@@ -95,7 +95,8 @@ def propagate(phase, system, slm):
 def compare_to_gs(obtained_phase, target, system, slm, gs_iter=20,):
 
     #TODO: Include all images in batch. For now only uses first image
-    target = np.expand_dims(target[0, :, :, :], axis=0)
+    print(target.shape)
+    target = np.expand_dims(target[0], axis=0)
     target_shape = target.shape
     obtained_phase = np.expand_dims(obtained_phase[0, :, :, :], axis=0)
 
