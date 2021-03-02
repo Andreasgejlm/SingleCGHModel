@@ -1,0 +1,46 @@
+
+DeepCGH_2D_512_3z:
+  training_data_path: TRAIN-Mx512-My512-nz3-nT32768
+  validation_data_path: VAL-Mx512-My512-nz3-nV64
+  test_data_folder: size_512x512
+  test_data_file: TESTBATCH_z_3
+  slm:
+    pixel_pitch: 0.000015
+    l0x: 0.00768
+    l0y: 0.00768
+  system:
+    dz: 0.005
+    num_z_planes: 3
+    wl: 1E-6
+  network:
+    shape: [512, 512, 3]
+    unet_n_kernels: 64
+    IF: 16
+    epochs: 30
+    batchsize: 32
+    lr: 1.0e-7
+    training_types: ["line", "circle", "polygon"]
+
+DeepCGH_2D_512_3z_1:
+  training_data_path: TRAIN-Mx512-My512-nz3-nT32768
+  validation_data_path: VAL-Mx512-My512-nz3-nV64
+  test_data_folder: size_512x512
+  test_data_file: TESTBATCH_z_3
+  slm:
+    pixel_pitch: 0.000015
+    l0x: 0.00768
+    l0y: 0.00768
+  system:
+    dz: 0.005
+    num_z_planes: 3
+    wl: 1E-6
+  network:
+    num_training_images: 32768
+    num_val_images: 64
+    shape: [512, 512, 3]
+    unet_n_kernels: 64
+    IF: 16
+    epochs: 10
+    batchsize: 32
+    lr: 1.0e-4
+    training_types: ["line", "circle", "polygon"]
