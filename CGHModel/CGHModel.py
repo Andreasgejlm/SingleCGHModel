@@ -1,7 +1,7 @@
 import numpy as np
 import os
 
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '0'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
 import tensorflow as tf
 from tensorflow.keras import Model, Input, layers
 from tensorflow.keras import backend as K
@@ -29,18 +29,17 @@ class CGHNet:
         self.path = Path(os.getcwd())
         self.training_data = dataprovider.get_training_data()
         self._trained = False
-        self.params = dataprovider.params  # if params else cfg.CGHNET.default
+        self.dataprovider = dataprovider
         self.lr = dataprovider.lr
         self.phase_factors = dataprovider.phase_factors
-        self.params["input_shape"] = (self.params["Mx"], self.params["My"], self.params["nz"])
-        self.model_name = "MODEL-Mx{}-My{}-nz{}-lp{}-nT{}-bs{}-eps{}".format(self.params["Mx"],
-                                                                                     self.params["My"],
-                                                                                     self.params["nz"],
-                                                                                     self.params["lp"],
-                                                                                     self.params["nT"],
-                                                                                     self.params[
-                                                                                         "batchsize"],
-                                                                                     self.params["epochs"])
+        self.input_shape = (self.dataprovider.Mx, self.dataprovider.My, self.dataprovider.My)
+        self.model_name = "MODEL-Mx{}-My{}-nz{}-lp{}-nT{}-bs{}-eps{}".format(self.dataprovider.Mx,
+                                                                                     self.dataprovider.My,
+                                                                                     self.dataprovider.My,
+                                                                                     self.dataprovider.lp,
+                                                                                     self.dataprovider.nT,
+                                                                                     self.dataprovider.batchsize,
+                                                                                     self.dataprovider.epochs)
         existing_path = self.path / "saved_models" / self.model_name
         if os.path.exists(existing_path):
             print("Such a model already exists.")
@@ -97,7 +96,7 @@ class CGHNet:
             tf.reduce_sum(tf.pow(y_predict, 2), axis=[1, 2, 3]) * tf.reduce_sum(tf.pow(y_true, 2), axis=[1, 2, 3]))
 
         sq_err = tf.reduce_mean((num + 1) / (denom + 1), axis=0)
-        return sq_err
+        return 1 - sq_err
 
     # LAYERS
     def _cc_layer(self, n_feature_maps, input):
@@ -121,10 +120,10 @@ class CGHNet:
         return x
 
     def _interleave(self, input):
-        return tf.nn.space_to_depth(input=input, block_size=self.params["IF"])
+        return tf.nn.space_to_depth(input=input, block_size=self.dataprovider.IF)
 
     def _deinterleave(self, input):
-        return tf.nn.depth_to_space(input=input, block_size=self.params["IF"])
+        return tf.nn.depth_to_space(input=input, block_size=self.dataprovider.IF)
 
     def _target_field(self, init_num_features, input_layer):
         x1 = self._cbn_layer(init_num_features, 'LeakyReLu', input_layer)
@@ -161,13 +160,13 @@ class CGHNet:
 
     def _branching(self, previous, before_unet):
 
-        real_branch = self._cc_layer(self.params["unet-ker-init"], previous)
+        real_branch = self._cc_layer(self.dataprovider.nK, previous)
         real_branch = layers.concatenate([real_branch, before_unet])
-        real_branch = layers.Conv2D(self.params["IF"] ** 2, (3, 3), activation='relu', padding='same')(real_branch)
+        real_branch = layers.Conv2D(self.dataprovider.IF ** 2, (3, 3), activation='relu', padding='same')(real_branch)
 
-        imag_branch = self._cc_layer(self.params["unet-ker-init"], previous)
+        imag_branch = self._cc_layer(self.dataprovider.nK, previous)
         imag_branch = layers.concatenate([imag_branch, before_unet])
-        imag_branch = layers.Conv2D(self.params["IF"] ** 2, (3, 3), activation=None, padding='same')(imag_branch)
+        imag_branch = layers.Conv2D(self.dataprovider.IF ** 2, (3, 3), activation=None, padding='same')(imag_branch)
 
         de_int_real = layers.Lambda(self._deinterleave, name="De-interleave_real")(real_branch)
         de_int_imag = layers.Lambda(self._deinterleave, name="De-interleave_imag")(imag_branch)
@@ -177,13 +176,13 @@ class CGHNet:
         return slm_field
 
     def build_model(self):
-        inp = Input(shape=(self.params["Mx"],
-                           self.params["My"],
-                           self.params["nz"]),
+        inp = Input(shape=(self.dataprovider.Mx,
+                           self.dataprovider.My,
+                           self.dataprovider.nz),
                     name='Input',
-                    batch_size=self.params["batchsize"])
+                    batch_size=self.dataprovider.batchsize)
         interleaved = layers.Lambda(self._interleave, name="interleave")(inp)
-        target_field = self._target_field(self.params["unet-ker-init"], interleaved)
+        target_field = self._target_field(self.dataprovider.nK, interleaved)
         slm_phase = self._branching(target_field, interleaved)
 
         model = Model(inp, slm_phase)
@@ -206,19 +205,20 @@ class CGHNet:
             optimizer=tf.keras.optimizers.Adam(learning_rate=self.lr),
         )
 
-        train_input_fn = _get_input_fn(filenames=train_files, epochs=self.params["epochs"], batchsize=self.params["batchsize"], shape=self.params["input_shape"])
-        eval_input_fn = _get_input_fn(filenames=val_files, epochs=self.params["epochs"], batchsize=self.params["batchsize"], shape=self.params["input_shape"])
+        train_input_fn = _get_input_fn(filenames=train_files, epochs=self.dataprovider.epochs, batchsize=self.dataprovider.batchsize, shape=self.input_shape)
+        eval_input_fn = _get_input_fn(filenames=val_files, epochs=self.dataprovider.epochs, batchsize=self.dataprovider.batchsize, shape=self.input_shape)
         training_history = self.model.fit(
             train_input_fn,
-            epochs=self.params["epochs"],
+            epochs=self.dataprovider.epochs,
             validation_data=eval_input_fn,
-            steps_per_epoch=self.params["nT"] // self.params["batchsize"],
+            steps_per_epoch=self.dataprovider.nT // self.dataprovider.batchsize,
             callbacks=[early_stop]
         )
         return self.params
 
-    def save_model(self):
-        existing_path = self.path / "saved_models" / self.model_name
+    def save_model(self, model_path=None):
+        model_path = model_path if model_path is not None else self.model_name
+        existing_path = self.path / "saved_models" / model_path
         if os.path.exists(existing_path):
             now = datetime.now()
             model_name = self.model_name + now.strftime("%m/%d/%Y-%H:%M:%S")

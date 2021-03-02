@@ -5,116 +5,126 @@ import random
 from tqdm import tqdm
 import tensorflow as tf
 import math
+import yaml
 from pathlib import Path
-from utils import line_plane_intersection
+from utils import line_plane_intersection, show_batch_from_filename
 np.seterr(all = "raise")
 import matplotlib.pyplot as plt
 
 
 
 class CGHDataProvider:
-    def __init__(self, slm, system, config):
+    def __init__(self, model_name):
         self.path = Path(os.getcwd())
         self.training_data_path = self.path / "DataProvider" / "training_data"
         self.validation_data_path = self.path / "DataProvider" / "validation_data"
         self.n_images_per_file = 512
         self.writer_options = tf.io.TFRecordOptions(compression_type='GZIP')
-        self.dataset_types = config.training_types
-        self.lr = config.lr
-        self.params = {
-            "nK": config.n_kern_unet,
-            "nT": config.nT,
-            "nV": config.nV,
-            "IF": config.IF,
-            "Mx": slm.Mx,
-            "My": slm.My,
-            "lp": slm.lp,
-            "l0x": slm.Mx * slm.lp,
-            "l0y": slm.My * slm.lp,
-            "nz": system.nz,
-            "dz": system.dz,
-            "wl": system.wl,
-            "batchsize": config.batchsize,
-            "epochs": config.epochs,
-            "unet-ker-init": config.n_kern_unet
-        }
-
-        self.x_samples_fp = np.linspace(-self.params["Mx"]/2+1, self.params["Mx"]/2, self.params["Mx"]) / self.params["Mx"] * self.params["l0x"]
-        self.y_samples_fp = np.linspace(-self.params["My"] / 2 + 1, self.params["My"] / 2, self.params["My"]) / self.params["My"] * self.params["l0y"]
-        nnz = 64
-        center = self.params["nz"] // 2
-        self.zs = [(zn - center) * self.params["dz"] for zn in range(self.params["nz"])]
-        self.z_samples_axis = np.linspace(self.zs[0] - self.params["dz"], self.zs[-1] + self.params["dz"], nnz)
+        self._load_config_file(model_name)
 
         self._generate_training_data()
-        self._calculate_phase_factors()
+        self._generate_test_data()
 
-    # TRAINING AND VALIDATION DATA
+    def _load_config_file(self, model_name):
+        with open(self.path / "pretrained_model_configs.yaml") as config_file:
+            config = yaml.safe_load(config_file)
+        assert config[model_name] is not None, "No model with the given name present in config file."
+        model_config = config[model_name]
 
-    def _create_line(self):
-        image = np.zeros((self.params["Mx"], self.params["My"], self.params["nz"]))
+        # Network specific
+        self.model_name = model_name
+        self.input_shape = model_config["network"]["shape"]
+        self.nT = model_config["network"]["num_training_images"]
+        self.nV = model_config["network"]["num_val_images"]
+        self.dataset_types = model_config["network"]["training_types"]
+
+        # SLM Specific
+        self.lp = model_config["slm"]["pixel_pitch"]
+        self.Mx, self.My, self.nz = self.input_shape
+        self.l0x = self.Mx * self.lp
+        self.l0y = self.My * self.lp
+
+        # Optical system Specific
+        self.wl = model_config["system"]["wl"]
+        self.dz = model_config["system"]["dz"]
+
+        self.test_data_path = (self.path / "dataprovider" / "test_data" / model_config["test_data_folder"] / model_config["test_data_file"]).with_suffix(
+            '.tfrecords')
+
+    # TRAINING, VALIDATION AND TEST DATA
+
+    def _create_line(self, shape=None):
+        image_shape = shape if shape is not None else (self.Mx, self.My, self.nz)
+        image = np.zeros(image_shape)
         while image.max() == 0:
-            for plane in range(self.params["nz"]):
+            for plane in range(image_shape[2]):
                 im = Image.fromarray(image[:, :, plane])
                 draw_im = ImageDraw.Draw(im)
-                num_lines = random.randint(1, 5)
+                num_lines = random.randint(5, 10)
                 for n_line in range(num_lines):
-                    start_x = random.randint(10, self.params["Mx"] - 10)
-                    start_y = random.randint(10, self.params["My"] - 10)
-                    stop_x = random.randint(10, self.params["Mx"] - 10)
-                    stop_y = random.randint(10, self.params["My"] - 10)
+                    start_x = random.randint(10, image_shape[0] - 10)
+                    start_y = random.randint(10, image_shape[1] - 10)
+                    stop_x = random.randint(10, image_shape[0] - 10)
+                    stop_y = random.randint(10, image_shape[1] - 10)
                     draw_im.line((start_x, start_y, stop_x, stop_y),
-                                 fill=random.randint(20, 256),
-                                 width=random.randint(2, 10))
+                                 fill=1,
+                                 width=1)
                 image[:, :, plane] = np.array(im, dtype='float32')
-                if plane != 0:
+                if plane != 0 and image[:, :, 0].max() != 0 and image[:, :, plane].max() != 0:
                     image[:, :, plane] *= np.sqrt(np.sum(image[:, :, 0] ** 2) / np.sum(image[:, :, plane] ** 2))
         image -= image.min()
         image /= image.max()
 
         return image
 
-    def _create_circle(self):
-        image = np.zeros((self.params["Mx"], self.params["My"], self.params["nz"]))
+    def _create_circle(self, shape=None):
+        image_shape = shape if shape is not None else (self.Mx, self.My, self.nz)
+        image = np.zeros(image_shape)
         while image.max() == 0:
-            for plane in range(self.params["nz"]):
+            for plane in range(image_shape[2]):
                 im = Image.fromarray(image[:, :, plane])
                 draw_im = ImageDraw.Draw(im)
-                num_circles = random.randint(1, 3)
+                num_circles = random.randint(5, 10)
                 for n_circle in range(num_circles):
-                    diameter = random.randint(3, int(self.params["Mx"] - 2))
-                    x_0 = random.randint(self.params["Mx"] // 2 - 10, self.params["Mx"] // 2 + 10)
-                    y_0 = random.randint(self.params["My"] // 2 - 10, self.params["My"] // 2 + 10)
+                    diameter = random.randint(3, int(min(image_shape[0], image_shape[1]) - 2))
+                    x_0 = random.randint(10, image_shape[0] - 10)
+                    y_0 = random.randint(10, image_shape[1] - 10)
                     x_1 = x_0 + diameter
                     y_1 = y_0 + diameter
                     draw_im.ellipse([(x_0, y_0), (x_1, y_1)],
-                                    outline=random.randint(20, 256),
-                                    fill=random.randint(20, 256),
-                                    width=random.randint(1, 3))
+                                    outline=1,
+                                    fill=1)
                 image[:, :, plane] = np.array(im, dtype='float32')
-                if plane != 0:
+                if plane != 0 and image[:, :, 0].max() != 0 and image[:, :, plane].max() != 0:
                     image[:, :, plane] *= np.sqrt(np.sum(image[:, :, 0] ** 2) / np.sum(image[:, :, plane] ** 2))
         image -= image.min()
         image /= image.max()
         return image
 
-    def _create_sphere(self):
-        image = np.zeros((self.params["Mx"], self.params["My"], self.params["nz"]))
-        min_R = 1.1 * self.params["dz"]
-        max_R = min(self.params["l0x"], self.params["l0y"]) // 4
-        n_spheres = random.randint(2, 5)
+    def _create_sphere(self, shape=None):
+        image_shape = shape if shape is not None else (self.Mx, self.My, self.nz)
+        if image_shape[-1] == 1:
+            return self._create_circle(image_shape)
+        image = np.zeros(image_shape)
+        min_R = 1.1 * self.dz
+        max_R = min(self.l0x, self.l0y) // 6
+        n_spheres = random.randint(2, 8)
+        center = image_shape[2] // 2
+        nnz = 64
+        zs = [(zn - center) * self.dz for zn in range(image_shape[2])]
+        z_samples_axis = np.linspace(zs[0] - self.dz, zs[-1] + self.dz, nnz)
         while image.max() == 0:
             for sphere in range(n_spheres):
-                centerx = random.choice(range(self.params["Mx"]))
-                centery = random.choice(range(self.params["My"]))
-                centerz = random.choice(self.z_samples_axis)
+                centerx = random.choice(range(image_shape[0]))
+                centery = random.choice(range(image_shape[1]))
+                centerz = random.choice(z_samples_axis)
                 sphere_radius = np.random.uniform(min_R, max_R)
-                for z in range(self.params["nz"]):
+                for z in range(image_shape[2]):
                     im = Image.fromarray(image[:, :, z])
                     draw_im = ImageDraw.Draw(im)
-                    delta_z = np.abs(centerz - self.zs[z])
+                    delta_z = np.abs(centerz - zs[z])
                     if sphere_radius > delta_z:
-                        cross_section_radius = np.sqrt(sphere_radius ** 2 - delta_z ** 2) // self.params["lp"]
+                        cross_section_radius = np.sqrt(sphere_radius ** 2 - delta_z ** 2) // self.lp
                         draw_im.ellipse([(centerx - cross_section_radius, centery - cross_section_radius),
                                         (centerx + cross_section_radius, centery + cross_section_radius)],
                                         fill=1)
@@ -126,28 +136,31 @@ class CGHDataProvider:
         image /= image.max()
         return image
 
-    def _create_cylinder(self):
-        image = np.zeros((self.params["Mx"], self.params["My"], self.params["nz"]))
+    def _create_cylinder(self, shape=None):
+        image_shape = shape if shape is not None else (self.Mx, self.My, self.nz)
+        image = np.zeros(image_shape)
         plane_vector = [0, 0, 1]
-        num_cyls = random.randint(2, 5)
-        max_R = min(self.params["Mx"], self.params["My"]) / 2
-        startz = self.zs[0]
-        endz = self.zs[-1]
+        num_cyls = random.randint(3, 8)
+        max_R = min(image_shape[0], image_shape[1]) / 2
+        center = image_shape[2] // 2
+        zs = [(zn - center) * self.dz for zn in range(image_shape[2])]
+        startz = zs[0]
+        endz = zs[-1]
         while image.max() == 0:
             for cyl in range(num_cyls):
-                startx = random.choice(range(self.params["Mx"]))
-                starty = random.choice(range(self.params["My"]))
+                startx = random.choice(range(image_shape[0]))
+                starty = random.choice(range(image_shape[1]))
 
-                endx = random.choice(range(self.params["Mx"]))
-                endy = random.choice(range(self.params["My"]))
+                endx = random.choice(range(image_shape[0]))
+                endy = random.choice(range(image_shape[1]))
 
                 line_vector = [endx - startx, endy - starty, endz - startz]
                 norm_line_v = line_vector / np.linalg.norm(line_vector)
                 line_point = [startx, starty, startz]
                 radius = random.uniform(0.1, 1) * max_R
                 radii = radius * norm_line_v
-                for plane in range(self.params["nz"]):
-                    plane_point = [startx, starty, self.zs[plane]]
+                for plane in range(image_shape[2]):
+                    plane_point = [startx, starty, zs[plane]]
                     I = line_plane_intersection(line_vector, line_point, plane_vector, plane_point)
                     if I is not None:
                         im = Image.fromarray(image[:, :, plane])
@@ -156,7 +169,7 @@ class CGHDataProvider:
                         y_1 = I[1] + radii[1]
                         draw_im.ellipse([(I[0] - radii[0], I[1] - radii[1]), (x_1, y_1)], fill=1)
                         image[:, :, plane] = np.array(im, dtype='float32')
-                    if plane != 0 and image[:, :, plane].max() != 0:
+                    if plane != 0 and image[:, :, 0].max() != 0 and image[:, :, plane].max() != 0:
                         image[:, :, plane] *= np.sqrt(np.sum(image[:, :, 0] ** 2) / np.sum(image[:, :, plane] ** 2))
         image -= image.min()
         try:
@@ -166,22 +179,23 @@ class CGHDataProvider:
             print(image)
         return image
 
-    def _create_polygon(self):
-        image = np.zeros((self.params["Mx"], self.params["My"], self.params["nz"]))
+    def _create_polygon(self, shape=None):
+        image_shape = shape if shape is not None else (self.Mx, self.My, self.nz)
+        image = np.zeros(image_shape)
         while image.max() == 0:
-            for plane in range(self.params["nz"]):
+            for plane in range(image_shape[2]):
                 im = Image.fromarray(image[:, :, plane])
                 draw_im = ImageDraw.Draw(im)
-                num_polys = random.randint(1, 5)
+                num_polys = random.randint(5, 10)
                 for n_poly in range(num_polys):
-                    radius = random.randint(5, int(self.params["Mx"] - 2))
-                    x_0 = random.randint(self.params["Mx"] // 2 - 10, self.params["Mx"] // 2 + 10)
-                    y_0 = random.randint(self.params["My"] // 2 - 10, self.params["My"] // 2 + 10)
+                    radius = random.randint(5, int(image_shape[0] - 2))
+                    x_0 = random.randint(10, image_shape[0] - 10)
+                    y_0 = random.randint(10, image_shape[1] - 10)
                     n_sides = random.randint(3, 6)
                     xs = [random.randint(x_0, x_0 + radius) for n in range(n_sides)]
                     ys = [random.randint(y_0, y_0 + radius) for n in range(n_sides)]
                     xy = [val for pair in zip(xs, ys) for val in pair]
-                    draw_im.polygon(xy, outline=random.randint(20, 256), fill=random.randint(20, 256))
+                    draw_im.polygon(xy, outline=1, fill=1)
                 image[:, :, plane] = np.array(im, dtype='float32')
                 if plane != 0 and image[:, :, 0].max() != 0 and image[:, :, plane].max() != 0:
                     image[:, :, plane] *= np.sqrt(np.sum(image[:, :, 0] ** 2) / np.sum(image[:, :, plane] ** 2))
@@ -193,18 +207,18 @@ class CGHDataProvider:
     def _generate_training_data(self):
 
         # Check whether training dataset exists already
-        dir_name = "TRAIN-Mx{}-My{}-nz{}-nT{}".format(self.params["Mx"],
-                                                                          self.params["My"],
-                                                                          self.params["nz"],
-                                                                          self.params["nT"])
+        dir_name = "TRAIN-Mx{}-My{}-nz{}-nT{}".format(self.Mx,
+                                                      self.My,
+                                                      self.nz,
+                                                      self.nT)
         if os.path.isdir(os.path.join(self.training_data_path, dir_name)):
             print("Chosen training data already exists. Continuing...")
         else:
             os.mkdir(self.training_data_path / dir_name)
-            n_files = self.params["nT"] // self.n_images_per_file
+            n_files = self.nT // self.n_images_per_file
             if n_files == 0:
                 n_files = 1
-                n_images = self.params["nT"]
+                n_images = self.nT
             else:
                 n_images = self.n_images_per_file
 
@@ -244,18 +258,18 @@ class CGHDataProvider:
 
     def _generate_validation_data(self):
         # Check whether validation dataset exists already
-        dir_name = "VAL-Mx{}-My{}-nz{}-nV{}".format(self.params["Mx"],
-                                                                          self.params["My"],
-                                                                          self.params["nz"],
-                                                                          self.params["nV"],)
+        dir_name = "VAL-Mx{}-My{}-nz{}-nV{}".format(self.Mx,
+                                                    self.My,
+                                                    self.nz,
+                                                    self.nV,)
         if os.path.isdir(os.path.join(self.validation_data_path, dir_name)):
             print("Chosen validation data already exists. Continuing...")
         else:
             os.mkdir(self.validation_data_path / dir_name)
-            n_files = self.params["nV"] // self.n_images_per_file
+            n_files = self.nV // self.n_images_per_file
             if n_files == 0:
                 n_files = 1
-                n_images = self.params["nV"]
+                n_images = self.nV
             else:
                 n_images = self.n_images_per_file
 
@@ -290,24 +304,93 @@ class CGHDataProvider:
                         writer.write(example_to_string)
         self.val_file_path = str(self.validation_data_path / dir_name)
 
+    def _generate_test_data(self):
+        # Test data consists of a batch of 32 multiplane images, one batch for each num. of planes.
+        # Images are a mix of 2D and 3D objects, and portraits.
+
+        sizes = [(256, 256), (512, 512), (1024, 1024), (1920, 1080)]
+        planes = [1, 3, 5, 7, 11]
+        orig_faces_path = self.path / "test_batch_orig_faces"
+        progress = tqdm(enumerate(sizes))
+        progress.set_description(f"Writing test data")
+        for sizeIndex, size in progress:
+            for nPlanes in planes:
+                plane_folder = self.path / "dataprovider" / "test_data" / f"size_{size[0]}x{size[1]}"
+                if not os.path.isdir(plane_folder):
+                    os.mkdir(plane_folder)
+                filename = plane_folder / f"TESTBATCH_z_{nPlanes}.tfrecords"
+                shape = (size[1], size[0], nPlanes)
+                if not os.path.isfile(filename):
+                    nPortraitImages = 8
+                    n2DImages = 8
+                    n3DImages = 16
+                    with tf.io.TFRecordWriter(str(filename), options=self.writer_options) as writer:
+                        portraits = [orig_faces_path / f for f in os.listdir(orig_faces_path) if os.path.isfile(orig_faces_path / f) and f"{size[0]}x{size[1]}" in f]
+                        for i in range(nPortraitImages):
+                            stackedPortrait = np.zeros(shape)
+                            selectedPortraits = random.choices(portraits, k=nPlanes)
+                            for index, portrait in enumerate(selectedPortraits):
+                                portraitImage = np.array(plt.imread(portrait), dtype='float32')
+                                portraitImage = np.expand_dims(portraitImage[:, :, 0], axis=[0])
+                                portraitImage -= portraitImage.min()
+                                portraitImage /= portraitImage.max()
+                                stackedPortrait[:, :, index] = portraitImage
+                            stackedPortraitString = stackedPortrait.tostring()
+                            f = tf.train.Feature(bytes_list=tf.train.BytesList(value=[stackedPortraitString]))
+                            feature = {'image': f}
+                            features = tf.train.Features(feature=feature)
+                            example = tf.train.Example(features=features)
+                            example_to_string = example.SerializeToString()
+                            writer.write(example_to_string)
+
+                        for i in range(n2DImages):
+                            rand_select = random.choice(['line', 'circle', 'polygon'])
+                            if rand_select == 'line':
+                                image2D = self._create_line(shape)
+                            elif rand_select == 'circle':
+                                image2D = self._create_circle(shape)
+                            else:
+                                image2D = self._create_polygon(shape)
+                            image_bytes = image2D.tostring()
+                            f = tf.train.Feature(bytes_list=tf.train.BytesList(value=[image_bytes]))
+                            feature = {'image': f}
+                            features = tf.train.Features(feature=feature)
+                            example = tf.train.Example(features=features)
+                            example_to_string = example.SerializeToString()
+                            writer.write(example_to_string)
+
+                        for i in range(n3DImages):
+                            rand_select = random.choice(['sphere', 'cylinder'])
+                            if rand_select == 'sphere':
+                                image3D = self._create_sphere(shape)
+                            elif rand_select == 'cylinder':
+                                image3D = self._create_cylinder(shape)
+                            image_bytes = image3D.tostring()
+                            f = tf.train.Feature(bytes_list=tf.train.BytesList(value=[image_bytes]))
+                            feature = {'image': f}
+                            features = tf.train.Features(feature=feature)
+                            example = tf.train.Example(features=features)
+                            example_to_string = example.SerializeToString()
+                            writer.write(example_to_string)
+
+
+
+
     # FOURIER OPTICS SPECIFIC FUNCTIONS
     def _calculate_phase_factors(self):
-        x, y = np.meshgrid(np.linspace(-self.params["My"] // 2 + 1, self.params["My"] // 2, self.params["My"]),
-                           np.linspace(-self.params["Mx"] // 2 + 1, self.params["Mx"] // 2, self.params["Mx"]))
-        Fx = x / self.params["lp"] / self.params["Mx"]
-        Fy = y / self.params["lp"] / self.params["My"]
+        x, y = np.meshgrid(np.linspace(-self.My // 2 + 1, self.My // 2, self.My),
+                           np.linspace(-self.Mx // 2 + 1, self.Mx // 2, self.Mx))
+        Fx = x / self.lp / self.Mx
+        Fy = y / self.lp / self.My
 
-        center = self.params["nz"] // 2
+        center = self.nz // 2
         phase_factors = []
 
-        for n in range(self.params["nz"]):
+        for n in range(self.nz):
             zn = n - center
-            p = np.exp(-1j * math.pi * self.params["wl"] * (zn * self.params["dz"]) * (Fx ** 2 + Fy ** 2))
+            p = np.exp(-1j * math.pi * self.wl * (zn * self.dz) * (Fx ** 2 + Fy ** 2))
             phase_factors.append(p.astype(np.complex64))
         self.phase_factors = phase_factors
-
-    def get_params(self):
-        return self.params
 
     # TODO: Get training data https://keras.io/examples/keras_recipes/tfrecord/
     def get_training_data(self):

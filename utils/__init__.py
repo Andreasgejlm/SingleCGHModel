@@ -1,8 +1,9 @@
 import os
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '0'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
 import tensorflow as tf
 import matplotlib.pyplot as plt
 import numpy as np
+from time import time
 
 
 def _read_tfrecord(path, shape):
@@ -29,12 +30,17 @@ def _get_input_fn(filenames, batchsize, epochs, shape, shuffle=1024):
     dataset = dataset.batch(batchsize)
     return dataset
 
+def show_batch_from_filename(filename, batchsize, shape):
+    input_fn = _get_input_fn(filename, batchsize, 1, shape, 1)
+    batch = next(iter(input_fn))
+    show_batch(batch)
 
 def show_batch(image_batch):
     image_batch = image_batch[0].numpy()
+    print(image_batch.shape)
     batchsize = len(image_batch)
     plt.figure(figsize=(15, 15))
-    axs = [plt.subplot(int(np.sqrt(batchsize)), int(np.sqrt(batchsize)), i + 1) for i in range(batchsize)]
+    axs = [plt.subplot(np.ceil(np.sqrt(batchsize)), np.ceil(np.sqrt(batchsize)), i + 1) for i in range(batchsize)]
     for n in range(batchsize):
         axs[n].imshow(image_batch[n], cmap='gray')
     plt.show()
@@ -49,6 +55,17 @@ def show_phase_batch(image_batch):
             plt.imshow(np.angle(image_batch[n]) / 256.0)
             plt.axis("off")
     plt.show(block=False)
+
+def save_image_batch(image_batch):
+    image_batch = image_batch[0].numpy()
+    batchsize = len(image_batch)
+    fig = plt.figure(frameon=False)
+    ax = plt.Axes(fig, [0., 0., 1., 1.])
+    ax.set_axis_off()
+    fig.add_axes(ax)
+    for n in range(batchsize):
+        ax.imshow(image_batch[n], cmap='gray', aspect='auto')
+        fig.savefig(f'batch-{n}.png', bbox_inches='tight')
 
 
 def line_plane_intersection(u, N, n, M):
@@ -95,7 +112,6 @@ def propagate(phase, system, slm):
 def compare_to_gs(obtained_phase, target, system, slm, gs_iter=20,):
 
     #TODO: Include all images in batch. For now only uses first image
-    print(target.shape)
     target = np.expand_dims(target[0], axis=0)
     target_shape = target.shape
     obtained_phase = np.expand_dims(obtained_phase[0, :, :, :], axis=0)
@@ -108,12 +124,15 @@ def compare_to_gs(obtained_phase, target, system, slm, gs_iter=20,):
     print(f"Running GS algorithm for {gs_iter} iterations ...")
     gs = GS3D(target_shape, system, slm)
     gs_errors = []
-    for it in range(1, gs_iter):
-        if it % 5 == 0:
-            gs_phase = gs.get_phase(np.squeeze(target, axis=0), it)[np.newaxis, ..., np.newaxis].astype(np.float32)
-            gs_images = propagate(gs_phase, system, slm)
-            gs_images = normalize_images(gs_images)
-            gs_errors.append(mean_sq_err(gs_images, target))
+    gs_times = []
+
+    t = time()
+    gs_phase = gs.get_phase(np.squeeze(target, axis=0), gs_iter)[np.newaxis, ..., np.newaxis].astype(np.float32)
+    t1 = time()
+    gs_images = propagate(gs_phase, system, slm)
+    gs_images = normalize_images(gs_images)
+    gs_errors.append(mean_sq_err(gs_images, target))
+    gs_times.append((t1-t))
 
     # Results of Network
     mse_cnn = mean_sq_err(nn_images, target)
@@ -130,7 +149,7 @@ def compare_to_gs(obtained_phase, target, system, slm, gs_iter=20,):
     axs[1, 2].imshow(obtained_phase[0, :, :, 0], cmap='gray')
     plt.show()
 
-    return mse_cnn, ssim_cnn, gs_errors, ssim_gs
+    return mse_cnn, ssim_cnn, gs_errors, gs_times, ssim_gs
 
 
 def L2(images, targets):
@@ -139,14 +158,21 @@ def L2(images, targets):
 
 
 def mean_sq_err(images, targets):
-    error = ((images - targets) ** 2).mean(axis=None)
+    error = np.sqrt((np.mean((images - targets) ** 2)))
+    return error
+
+def mean_sq_errs(images, targets):
+    error = np.mean(np.square(images - targets), axis=(1, 2, 3))
     return error
 
 
 def normalize_images(images):
-    x = images - images.min()
-    x = images / images.max() if images.max() != 0 else 0
-    return x
+    normalized = np.zeros_like(images)
+    for image in range(images.shape[0]):
+        x = images[image, :, :, :] - images[image, :, :, :].min()
+        normalized[image, :, :, :] = x / x.max() if x.max() != 0 else 0
+
+    return normalized
 
 
 class GS3D(object):
